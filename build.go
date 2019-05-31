@@ -380,6 +380,27 @@ func Build(opts *BuildArgs) error {
 	author := fmt.Sprintf("%s@%s", username, host)
 
 	s.Delete(WorkingContainerName)
+
+	// Need to change working directory to the folder where the stackerfile
+	// is located, so relative paths in the imports section would work
+	// regardless the initial working directory when Stacker was called
+
+	// Identify initial working directory
+	initialWd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	// Identify working directory for this Stackerfile
+	imageWd, err := sf.Directory()
+	if err != nil {
+		return err
+	}
+
+	if err := os.Chdir(imageWd); err != nil {
+		return err
+	}
+
 	for _, name := range order {
 		l, ok := sf.Get(name)
 		if !ok {
@@ -680,10 +701,60 @@ func Build(opts *BuildArgs) error {
 		}
 	}
 
+	// Revert to original working directory
+	if err := os.Chdir(initialWd); err != nil {
+		return err
+	}
+
 	err = oci.GC(context.Background())
 	if err != nil {
 		fmt.Printf("final OCI GC failed: %v", err)
 	}
 
 	return err
+}
+
+// Build a list of stackerfiles using the same options
+// Note the path in the opts is ignored and changed to by each path in paths
+func BuildMultiple(paths []string, opts *BuildArgs) error {
+
+	// Read all the stacker recipes
+	stackerFiles, err := NewStackerFiles(paths, opts.Substitute)
+	if err != nil {
+		return err
+	}
+
+	// Initialize the DAG
+	dag, err := NewStackerFilesDAG(stackerFiles)
+	if err != nil {
+		return err
+	}
+
+	sortedPaths := dag.Sort()
+
+	// Show the serial build order
+	fmt.Printf("stacker build order:\n")
+	for i, p := range sortedPaths {
+		prerequisites, err := dag.GetStackerFile(p).Prerequisites()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%d will build %s: requires: %v\n", i, p, prerequisites)
+	}
+
+	// Build all Stackerfiles
+	for i, p := range sortedPaths {
+		fmt.Printf("building: %d %s\n", i, p)
+
+		// Update path to Stackerfile
+		opts.StackerFile = p
+
+		// Build
+		err = Build(opts)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

@@ -88,5 +88,5 @@ func doBuild(ctx *cli.Context) error {
 		Debug:                   debug,
 	}
 
-	return stacker.Build(&args)
+	return stacker.BuildMultiple([]string{ctx.String("stacker-file")}, &args)
 }

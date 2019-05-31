@@ -6,7 +6,9 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -29,6 +31,10 @@ type StackerConfig struct {
 	RootFSDir  string `yaml:"rootfs_dir"`
 }
 
+type BuildConfig struct {
+	Prerequisites []string `yaml:"prerequisites"`
+}
+
 type Stackerfile struct {
 	// AfterSubstitutions is the contents of the stacker file after
 	// substitutions (i.e., the content that is actually used by stacker).
@@ -39,6 +45,12 @@ type Stackerfile struct {
 
 	// fileOrder is the order of elements as they appear in the stackerfile.
 	fileOrder []string
+
+	// configuration specific for this specific build
+	buildConfig *BuildConfig
+
+	// path to stackerfile
+	path string
 }
 
 func (sf *Stackerfile) Get(name string) (*Layer, bool) {
@@ -50,6 +62,21 @@ func (sf *Stackerfile) Get(name string) (*Layer, bool) {
 
 func (sf *Stackerfile) Len() int {
 	return len(sf.internal)
+}
+
+func (sf *Stackerfile) Directory() (string, error) {
+	pathUrl, err := url.Parse(sf.path)
+	if err != nil {
+		return "", err
+	}
+
+	if pathUrl.Scheme != "" {
+		// Can't do much in case of HTTP URLs, assume initial working directory is the right one
+		return os.Getwd()
+	}
+
+	// In case of non-HTTP URLs return the absolute path the to working directory
+	return filepath.Abs(filepath.Dir(sf.path))
 }
 
 const (
@@ -276,6 +303,7 @@ func substitute(content string, substitutions []string) (string, error) {
 // in the order that they are given.
 func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, error) {
 	sf := Stackerfile{}
+	sf.path = stackerfile
 
 	url, err := url.Parse(stackerfile)
 	if err != nil {
@@ -293,7 +321,7 @@ func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, e
 		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("couldn't download %s: %s", stackerfile, resp.Status)
+			return nil, fmt.Errorf("stackerfile: couldn't download %s: %s", stackerfile, resp.Status)
 		}
 
 		raw, err = ioutil.ReadAll(resp.Body)
@@ -309,24 +337,41 @@ func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, e
 
 	sf.AfterSubstitutions = content
 
-	if err := yaml.Unmarshal([]byte(content), &sf.internal); err != nil {
-		return nil, err
-	}
-
-	// Parse a second time so that we can remember the file order.
+	// Parse the first time to validate the format/content
 	ms := yaml.MapSlice{}
 	if err := yaml.Unmarshal([]byte(content), &ms); err != nil {
 		return nil, err
 	}
 
-	sf.fileOrder = []string{}
+	// Determine the layers in the stacker.yaml, their order and the list of prerequisite files
+	sf.fileOrder = []string{}      // Order of layers
+	sf.buildConfig = &BuildConfig{ // Stacker build configuration
+		Prerequisites: []string{},
+	}
+	lms := yaml.MapSlice{} // Actual list of layers excluding the stacker_config directive
 	for _, e := range ms {
-		sf.fileOrder = append(sf.fileOrder, e.Key.(string))
+		keyName, ok := e.Key.(string)
+		if !ok {
+			return nil, fmt.Errorf("stackerfile: cannot cast %v to string", e.Key)
+		}
+
+		if "stacker_config" == keyName {
+			stackerConfigContent, err := yaml.Marshal(e.Value)
+			if err != nil {
+				return nil, err
+			}
+			if err = yaml.Unmarshal(stackerConfigContent, &sf.buildConfig); err != nil {
+				return nil, fmt.Errorf("stackerfile: cannot interpret 'stacker_config' value %v", e.Value)
+			}
+		} else {
+			sf.fileOrder = append(sf.fileOrder, e.Key.(string))
+			lms = append(lms, e)
+		}
 	}
 
-	// Now, let's make sure that all the things people supplied are
+	// Now, let's make sure that all the things people supplied in the layers are
 	// actually things this stacker understands.
-	for _, e := range ms {
+	for _, e := range lms {
 		for _, directive := range e.Value.(yaml.MapSlice) {
 			found := false
 			for _, field := range layerFields {
@@ -337,7 +382,7 @@ func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, e
 			}
 
 			if !found {
-				return nil, fmt.Errorf("unknown directive %s", directive.Key.(string))
+				return nil, fmt.Errorf("stackerfile: unknown directive %s", directive.Key.(string))
 			}
 
 			if directive.Key.(string) == "from" {
@@ -351,16 +396,72 @@ func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, e
 					}
 
 					if !found {
-						return nil, fmt.Errorf("unknown image source directive %s", sourceDirective.Key.(string))
+						return nil, fmt.Errorf("stackerfile: unknown image source directive %s",
+							sourceDirective.Key.(string))
 					}
 				}
 			}
 		}
 	}
 
+	// Marshall only the layers so we can unmarshal them in the right data structure later
+	layersContent, err := yaml.Marshal(lms)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal to save the data in the right structure to enable further processing
+	if err := yaml.Unmarshal(layersContent, &sf.internal); err != nil {
+		return nil, err
+	}
+
 	return &sf, err
 }
 
+// NewStackerFiles reads multiple Stackerfiles from a list of paths and applies substitutions
+// It adds the Stackerfiles mentioned in the prerequisite paths to the results
+func NewStackerFiles(paths []string, substituteVars []string) (map[string]*Stackerfile, error) {
+	sfm := make(map[string]*Stackerfile, len(paths))
+
+	// Iterate over list of paths to stackerfiles
+	for _, path := range paths {
+		fmt.Printf("initializing stacker recipe: %s\n", path)
+
+		// Read this stackerfile
+		sf, err := NewStackerfile(path, substituteVars)
+		if err != nil {
+			return nil, err
+		}
+
+		// Add using absolute path to make sure the entries are unique
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := sfm[absPath]; ok != true {
+			sfm[absPath] = sf
+		}
+
+		// Determine correct path of prerequisites
+		prerequisites, err := sf.Prerequisites()
+		if err != nil {
+			return nil, err
+		}
+
+		// Need to also add stackerfile dependencies of this stackerfile to the map of stackerfiles
+		depStackerFiles, err := NewStackerFiles(prerequisites, substituteVars)
+		if err != nil {
+			return nil, err
+		}
+		for depPath, depStackerFile := range depStackerFiles {
+			sfm[depPath] = depStackerFile
+		}
+	}
+
+	return sfm, nil
+}
+
+// DependencyOrder provides the list of layer names from a stackerfile in the current order to be built
 func (s *Stackerfile) DependencyOrder() ([]string, error) {
 	ret := []string{}
 	processed := map[string]bool{}
@@ -417,4 +518,35 @@ func (s *Stackerfile) DependencyOrder() ([]string, error) {
 	}
 
 	return ret, nil
+}
+
+// Prerequisites provides the absolute paths to the Stackerfiles which are dependencies
+// for building this Stackerfile
+func (sf *Stackerfile) Prerequisites() ([]string, error) {
+	pathUrl, err := url.Parse(sf.path)
+	if err != nil {
+		// This should never be the case, as the path was previously validated
+		return nil, err
+	}
+
+	// Cleanup paths in the prerequisites
+	var prerequisitePaths []string
+	for _, prerequisitePath := range sf.buildConfig.Prerequisites {
+		var absPath string
+		// Todo handle HTML URLs
+		if pathUrl.Scheme != "" || filepath.IsAbs(prerequisitePath) {
+			// Path to stackerfile is a HTTP URL
+			// or prerequisite is already an absolute path
+			absPath, err = filepath.Abs(prerequisitePath)
+		} else {
+			// If path is relative we need to add it to the path to this stackerfile
+			absPath, err = filepath.Abs(filepath.Join(filepath.Dir(sf.path), prerequisitePath))
+		}
+		if err != nil {
+			return nil, err
+		}
+		prerequisitePaths = append(prerequisitePaths, absPath)
+	}
+
+	return prerequisitePaths, nil
 }
