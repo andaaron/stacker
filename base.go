@@ -315,9 +315,12 @@ func getBuilt(o BaseLayerOpts, sf *Stackerfile) error {
 	base := o.Layer
 	for {
 		var ok bool
-		base, ok = sf.Get(base.From.Tag)
+		base, ok := sf.Get(base.From.Tag)
 		if !ok {
-			return fmt.Errorf("missing base layer %s?", o.Layer.From.Tag)
+			// The base layer may be included in one if the prerequisite stackerfiles
+			fmt.Printf("WARNING: base layer %s mising from stackerfile %s!\n", o.Layer.From.Tag, sf.path)
+			// return fmt.Errorf("missing base layer %s?", o.Layer.From.Tag)
+			break
 		}
 
 		if base.From.Type != BuiltType {

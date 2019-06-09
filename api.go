@@ -313,6 +313,12 @@ func NewStackerfile(stackerfile string, substitutions []string) (*Stackerfile, e
 	var raw []byte
 	if url.Scheme == "" {
 		raw, err = ioutil.ReadFile(stackerfile)
+		// Make sure we use the absolute path to the Stackerfile
+		sf.path, err = filepath.Abs(stackerfile)
+		if err != nil {
+			return nil, err
+		}
+
 	} else {
 		resp, err := http.Get(stackerfile)
 		if err != nil {
@@ -461,10 +467,14 @@ func NewStackerFiles(paths []string, substituteVars []string) (map[string]*Stack
 	return sfm, nil
 }
 
-// DependencyOrder provides the list of layer names from a stackerfile in the current order to be built
+// DependencyOrder provides the list of layer names from a stackerfile
+// the current order to be built, note this method does not reorder the layers,
+// but it does validate they are specified in an order which makes sense
 func (s *Stackerfile) DependencyOrder() ([]string, error) {
 	ret := []string{}
 	processed := map[string]bool{}
+	// Determine if the stackerfile has other stackerfiles as dependencies
+	hasPrerequisites := len(s.buildConfig.Prerequisites) > 0
 
 	for i := 0; i < s.Len(); i++ {
 		for _, name := range s.fileOrder {
@@ -479,14 +489,17 @@ func (s *Stackerfile) DependencyOrder() ([]string, error) {
 				return nil, fmt.Errorf("invalid layer: no base (from directive)")
 			}
 
-			_, haveBaseTag := processed[layer.From.Tag]
+			// Determine if the layer uses a previously processed layer as base
+			_, baseTagProcessed := processed[layer.From.Tag]
 
 			imports, err := layer.ParseImport()
 			if err != nil {
 				return nil, err
 			}
 
-			haveStackerImports := true
+			// Determine if the layer has stacker:// imports from another
+			// layer which has not been processed
+			allStackerImportsProcessed := true
 			for _, imp := range imports {
 				url, err := url.Parse(imp)
 				if err != nil {
@@ -499,14 +512,19 @@ func (s *Stackerfile) DependencyOrder() ([]string, error) {
 
 				_, ok := processed[url.Host]
 				if !ok {
-					haveStackerImports = false
+					allStackerImportsProcessed = false
 					break
 				}
 			}
 
-			// all imported layers have no deps, or if it's not
-			// imported and we have the base tag, that's ok too.
-			if haveStackerImports && (layer.From.Type != BuiltType || haveBaseTag) {
+			if allStackerImportsProcessed && (layer.From.Type != BuiltType || baseTagProcessed) {
+				// None of the imports using stacker:// are referencing unprocessed layers,
+				// and in case the base layer is type build we have already processed it
+				ret = append(ret, name)
+				processed[name] = true
+			} else if hasPrerequisites {
+				// Just assume the imports are based on images defined in one of the stacker
+				// files defined in the prerequisite paths
 				ret = append(ret, name)
 				processed[name] = true
 			}

@@ -72,10 +72,10 @@ func NewApply(sf *Stackerfile, opts BaseLayerOpts, storage Storage, considerTime
 	} else if opts.Layer.From.Type == BuiltType {
 		base, ok := sf.Get(opts.Layer.From.Tag)
 		if !ok {
-			return nil, fmt.Errorf("missing base layer?")
-		}
-
-		if base.BuildOnly {
+			// The base layer may be included in one if the prerequisite stackerfiles
+			fmt.Printf("WARNING: base layer %s mising from stackerfile %s!\n", opts.Layer.From.Tag, sf.path)
+			// return nil, fmt.Errorf("missing base layer?")
+		} else if base.BuildOnly {
 			// XXX: this isn't actually that hard to support if we
 			// need to, but I suspect we don't really. The problem
 			// is that no OCI layers are generated for build-only
