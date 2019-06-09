@@ -34,6 +34,7 @@ type BuildArgs struct {
 	ApplyConsiderTimestamps bool
 	LayerType               string
 	Debug                   bool
+	OrderOnly               bool
 }
 
 func updateBundleMtree(rootPath string, newPath ispec.Descriptor) error {
@@ -739,7 +740,12 @@ func BuildMultiple(paths []string, opts *BuildArgs) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%d will build %s: requires: %v\n", i, p, prerequisites)
+		fmt.Printf("%d build %s: requires: %v\n", i, p, prerequisites)
+	}
+
+	if opts.OrderOnly {
+		// User has requested only to see the build order, so skipping the actual build
+		return nil
 	}
 
 	// Build all Stackerfiles
