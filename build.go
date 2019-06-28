@@ -9,12 +9,10 @@ import (
 	"os/exec"
 	"os/user"
 	"path"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	stackeroci "github.com/anuvu/stacker/oci"
 	"github.com/openSUSE/umoci"
 	"github.com/openSUSE/umoci/mutate"
 	"github.com/openSUSE/umoci/oci/casext"
@@ -23,6 +21,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/vbatts/go-mtree"
 	"golang.org/x/sys/unix"
+
+	"github.com/anuvu/stacker/lib"
+	stackeroci "github.com/anuvu/stacker/oci"
 )
 
 type BuildArgs struct {
@@ -35,6 +36,8 @@ type BuildArgs struct {
 	LayerType               string
 	Debug                   bool
 	OrderOnly               bool
+	EnableRemoteSave        bool
+	RemoteSaveTags          []string
 }
 
 func updateBundleMtree(rootPath string, newPath ispec.Descriptor) error {
@@ -313,6 +316,56 @@ func generateSquashfsLayer(oci casext.Engine, name string, author string, opts *
 	return nil
 }
 
+// SaveLayer stores the final layers into a separate location based on the content of
+// the stackerfile, this is useful to avoid an extra manual step to upload build results
+// and also in case of caching in between stacker builds the logic should work for both
+// Docker registry destination and OCI layout destinations
+// In case of OCI layout destinations the tag will be included in the layer name
+func SaveLayer(opts *BuildArgs, sf *Stackerfile, name string) error {
+	if len(sf.buildConfig.SaveUrl) == 0 {
+		fmt.Printf("layer %s will not be save since it doesn't have a save URL\n", name)
+		return nil
+	}
+
+	// Add git tag to the list of tags to be used
+	commitTag, err := NewGitLayerTag(sf.referenceDirectory)
+	if err != nil {
+		return err
+	}
+	tags := append(opts.RemoteSaveTags, commitTag)
+
+	// Need to determine if URL is docker/oci or something else
+	is, err := NewImageSource(sf.buildConfig.SaveUrl)
+	if err != nil {
+		return err
+	}
+
+	// Store the layer with each tag
+	for _, tag := range tags {
+		var destUrl string
+		switch is.Type {
+		case DockerType:
+			destUrl = fmt.Sprintf("%s/%s:%s", strings.TrimRight(sf.buildConfig.SaveUrl, "/"), name, tag)
+		case OCIType:
+			destUrl = fmt.Sprintf("%s:%s_%s", sf.buildConfig.SaveUrl, name, tag)
+		default:
+			return errors.Errorf("can't save layers to destination type: %s", is.Type)
+		}
+
+		fmt.Printf("saving %s\n", destUrl)
+		err = lib.ImageCopy(lib.ImageCopyOpts{
+			Src:  fmt.Sprintf("oci:%s:%s", opts.Config.OCIDir, name),
+			Dest: destUrl,
+			Progress: os.Stdout,
+			SkipTLS:  true,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Builder is responsible for building the layers based on stackerfiles
 type Builder struct {
 	builtStackerfiles StackerFiles // Keep track of all the Stackerfiles which were built
@@ -371,16 +424,11 @@ func (b *Builder) Build(file string) error {
 		return err
 	}
 
-	dir, err := filepath.Abs(path.Dir(file))
-	if err != nil {
-		return err
-	}
-
 	// compute the git version for the directory that the stacker file is
 	// in. we don't care if it's not a git directory, because in that case
 	// we'll fall back to putting the whole stacker file contents in the
 	// metadata.
-	gitVersion, _ := GitVersion(dir)
+	gitVersion, _ := GitVersion(sf.referenceDirectory)
 
 	username := os.Getenv("SUDO_USER")
 
@@ -439,6 +487,15 @@ func (b *Builder) Build(file string) error {
 				}
 			}
 			fmt.Printf("found cached layer %s\n", name)
+
+			// Save image if requested by user
+			if opts.EnableRemoteSave {
+				err := SaveLayer(opts, sf, name)
+				if err != nil {
+					return err
+				}
+			}
+
 			continue
 		}
 
@@ -699,11 +756,19 @@ func (b *Builder) Build(file string) error {
 		if err := buildCache.Put(name, descPaths[0].Descriptor()); err != nil {
 			return err
 		}
+
+		// Store image if requested by user
+		if opts.EnableRemoteSave {
+			err := SaveLayer(opts, sf, name)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	err = oci.GC(context.Background())
 	if err != nil {
-		fmt.Printf("final OCI GC failed: %v", err)
+		fmt.Printf("final OCI GC failed: %v\n", err)
 	}
 
 	return err

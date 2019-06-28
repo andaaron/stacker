@@ -50,6 +50,14 @@ var buildCmd = cli.Command{
 			Name:  "order-only",
 			Usage: "show the build order without running the actual build",
 		},
+		cli.BoolFlag{
+			Name:  "remote-save",
+			Usage: "save the images at the URLs specified in the stackerfiles",
+		},
+		cli.StringSliceFlag{
+			Name:  "remote-save-tag",
+			Usage: "tag to be used with --remote-save",
+		},
 	},
 	Before: beforeBuild,
 }
@@ -63,6 +71,17 @@ func beforeBuild(ctx *cli.Context) error {
 		err := ctx.Set("on-run-failure", "/bin/sh")
 		if err != nil {
 			return err
+		}
+	}
+
+	if !ctx.IsSet("store") {
+		if ctx.IsSet( "store-caching") {
+			// Cannot do caching if uploading to storage URL is disabled
+			return fmt.Errorf("--store-caching requires --store")
+		}
+		if len(ctx.StringSlice( "store-tag")) != 0 {
+			// Cannot set upload tags if uploading to storage URL is disabled
+			return fmt.Errorf("--store-tag requires --store")
 		}
 	}
 
@@ -88,6 +107,8 @@ func doBuild(ctx *cli.Context) error {
 		OnRunFailure:            ctx.String("on-run-failure"),
 		ApplyConsiderTimestamps: ctx.Bool("apply-consider-timestamps"),
 		LayerType:               ctx.String("layer-type"),
+		EnableRemoteSave:        ctx.Bool("remote-save"),
+		RemoteSaveTags:          ctx.StringSlice("remote-save-tag"),
 		OrderOnly:               ctx.Bool("order-only"),
 		Debug:                   debug,
 	}
