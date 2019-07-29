@@ -36,6 +36,7 @@ type BuildArgs struct {
 	Debug                   bool
 	OrderOnly               bool
 	RemoteSaveTags          []string
+	RemoteCaching           bool
 }
 
 func updateBundleMtree(rootPath string, newPath ispec.Descriptor) error {
@@ -197,7 +198,7 @@ func SaveLayer(opts *BuildArgs, sf *Stackerfile, name string) error {
 		fmt.Printf("can't save layer %s since list of tags is empty\n", name)
 	}
 
-	// Store the layers to new detination
+	// Store the layers to new destination
 	for _, tag := range tags {
 		var destUrl string
 		switch is.Type {
@@ -219,6 +220,69 @@ func SaveLayer(opts *BuildArgs, sf *Stackerfile, name string) error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// LoadLayer loads layers from a separate location based on the content of
+// the stackerfile, this is useful caching in between stacker builds
+// The logic should work for both Docker registry destination and OCI layout destinations
+// In case of OCI layout destinations the tag will be included in the layer name
+func LoadLayer(opts *BuildArgs, sf *Stackerfile, name string) error {
+	if len(sf.buildConfig.SaveUrl) == 0 {
+		return fmt.Errorf("layer %s cannot be loaded from remote cache since it doesn't have a save URL", name)
+	}
+
+	// Need to determine if URL is docker/oci or something else
+	is, err := NewImageSource(sf.buildConfig.SaveUrl)
+	if err != nil {
+		return err
+	}
+
+	// Determine list of tags to be used, from command line or git tags
+	tags := opts.RemoteSaveTags
+
+	// Attempt to produce a git commit tag
+	commitTag, err := NewGitLayerTag(sf.referenceDirectory)
+	if err == nil {
+		// Add git tag to the list of tags to be used
+		tags = append(tags, commitTag)
+	}
+
+	if len(tags) == 0 {
+		return fmt.Errorf("can't load layer %s from remote cache since list of tags to search for is empty", name)
+	}
+
+	// Store the layers to new destination
+	downloaded := false
+	for _, tag := range tags {
+		var srcUrl string
+		switch is.Type {
+		case DockerType:
+			srcUrl = fmt.Sprintf("%s/%s:%s", strings.TrimRight(sf.buildConfig.SaveUrl, "/"), name, tag)
+		case OCIType:
+			srcUrl = fmt.Sprintf("%s:%s_%s", sf.buildConfig.SaveUrl, name, tag)
+		default:
+			return fmt.Errorf("can't load layers from destination type: %s", is.Type)
+		}
+
+		fmt.Printf("loading %s\n", srcUrl)
+		err = lib.ImageCopy(lib.ImageCopyOpts{
+			Src:      srcUrl,
+			Dest:     fmt.Sprintf("oci:%s:%s", opts.Config.OCIDir, name),
+			Progress: os.Stdout,
+			SkipTLS:  true,
+		})
+
+		if err == nil {
+			// If download was successful, do not try to download other tags
+			downloaded = true
+			break
+		}
+	}
+
+	if !downloaded {
+		return fmt.Errorf("can't load layer from remote cache since all copy attemps failed")
 	}
 	return nil
 }

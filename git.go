@@ -71,3 +71,43 @@ func NewGitLayerTag(path string) (string, error) {
 	// Add commit id in tag
 	return "commit-" + hash, nil
 }
+
+// GetAllAncestorHashes return a slice of all commit IDs on this branch
+func GetAllAncestorHashes(path string, short bool) ([]string, error) {
+	// Get a string of all commit IDs
+	args := []string{"-C", path, "rev-list", "HEAD"}
+	output, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+
+	// Obtain a slice of commit IDs
+	commits:=strings.Split(string(output), "\n")
+	for i := range commits {
+		commits[i] = strings.TrimSpace(commits[i])
+		if short {
+			commits[i] = commits[i][:8]
+		}
+	}
+
+	return commits, nil
+}
+
+
+// GetChangedFilesSinceHash return a slice of all files changed since a particular commit
+func GetChangedFilesSinceHash(path, hash string) ([]string, error) {
+	// Get a list of all changed files
+	args := []string{"-C", path, "diff", "--name-only", hash}
+	output, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+
+	// Obtain a slice of changed files
+	files:=strings.Split(string(output), "\n")
+	for i := range files {
+		files[i] = strings.TrimSpace(files[i])
+	}
+
+	return files, nil
+}

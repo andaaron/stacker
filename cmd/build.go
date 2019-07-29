@@ -54,6 +54,10 @@ var buildCmd = cli.Command{
 			Name:  "remote-save-tag",
 			Usage: "tag to be used with --remote-save",
 		},
+		cli.BoolFlag{
+			Name:  "remote-caching",
+			Usage: "cache layers remotely for multiple stacker builds",
+		},
 	},
 	Before: beforeBuild,
 }
@@ -93,6 +97,7 @@ func doBuild(ctx *cli.Context) error {
 		ApplyConsiderTimestamps: ctx.Bool("apply-consider-timestamps"),
 		LayerType:               ctx.String("layer-type"),
 		RemoteSaveTags:          ctx.StringSlice("remote-save-tag"),
+		RemoteCaching: 			 ctx.Bool("remote-caching"),
 		OrderOnly:               ctx.Bool("order-only"),
 		Debug:                   debug,
 	}
